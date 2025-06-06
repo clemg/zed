@@ -294,6 +294,108 @@ impl InlayId {
     }
 }
 
+/// Smooth cursor animation state following VS Code's approach
+#[derive(Debug)]
+struct SmoothCursorState {
+    /// Current displayed position (what user sees)
+    displayed_row: std::cell::Cell<f32>,
+    displayed_col: std::cell::Cell<f32>,
+    /// Target position (where cursor actually is)
+    target_row: std::cell::Cell<f32>,
+    target_col: std::cell::Cell<f32>,
+    /// Whether animation is currently active
+    is_animating: std::cell::Cell<bool>,
+    /// Animation lerp factor (0.0 to 1.0, higher = faster)
+    lerp_factor: f32,
+}
+
+impl SmoothCursorState {
+    fn new() -> Self {
+        Self {
+            displayed_row: std::cell::Cell::new(0.0),
+            displayed_col: std::cell::Cell::new(0.0),
+            target_row: std::cell::Cell::new(0.0),
+            target_col: std::cell::Cell::new(0.0),
+            is_animating: std::cell::Cell::new(false),
+            lerp_factor: 0.6,
+        }
+    }
+
+    fn new_with_position(row: f32, col: f32) -> Self {
+        Self {
+            displayed_row: std::cell::Cell::new(row),
+            displayed_col: std::cell::Cell::new(col),
+            target_row: std::cell::Cell::new(row),
+            target_col: std::cell::Cell::new(col),
+            is_animating: std::cell::Cell::new(false),
+            lerp_factor: 0.6,
+        }
+    }
+
+    fn set_target(&self, row: f32, col: f32) {
+        let displayed_row = self.displayed_row.get();
+        let displayed_col = self.displayed_col.get();
+        let distance = ((row - displayed_row).powi(2) + (col - displayed_col).powi(2)).sqrt();
+
+        if self.is_animating.get() {
+            let target_row = self.target_row.get();
+            let target_col = self.target_col.get();
+            let target_distance = ((row - target_row).powi(2) + (col - target_col).powi(2)).sqrt();
+            if target_distance < 0.1 {
+                self.target_row.set(row);
+                self.target_col.set(col);
+                return;
+            }
+        }
+
+        self.target_row.set(row);
+        self.target_col.set(col);
+
+        // Only animate if movement is significant enough
+        if distance > 0.05 {
+            self.is_animating.set(true);
+        } else {
+            self.displayed_row.set(row);
+            self.displayed_col.set(col);
+            self.is_animating.set(false);
+        }
+    }
+
+    fn update_animation(&self) -> bool {
+        if !self.is_animating.get() {
+            return false;
+        }
+
+        let displayed_row = self.displayed_row.get();
+        let displayed_col = self.displayed_col.get();
+        let target_row = self.target_row.get();
+        let target_col = self.target_col.get();
+
+        let row_diff = target_row - displayed_row;
+        let col_diff = target_col - displayed_col;
+
+        // Check if we're close enough to stop animating
+        let distance = (row_diff.powi(2) + col_diff.powi(2)).sqrt();
+        if distance < 0.005 {
+            self.displayed_row.set(target_row);
+            self.displayed_col.set(target_col);
+            self.is_animating.set(false);
+            return false;
+        }
+
+        self.displayed_row
+            .set(displayed_row + row_diff * self.lerp_factor);
+        self.displayed_col
+            .set(displayed_col + col_diff * self.lerp_factor);
+
+        true
+    }
+
+    fn get_displayed_position(&self) -> (f32, f32) {
+        (self.displayed_row.get(), self.displayed_col.get())
+    }
+}
+
 pub enum ActiveDebugLine {}
 pub enum DebugStackFrameLine {}
 enum DocumentHighlightRead {}
@@ -1091,6 +1193,7 @@ pub struct Editor {
     serialize_selections: Task<()>,
     serialize_folds: Task<()>,
     mouse_cursor_hidden: bool,
+    smooth_cursor_state: SmoothCursorState,
     minimap: Option<Entity<Self>>,
     hide_mouse_mode: HideMouseMode,
     pub change_list: ChangeList,
@@ -1984,6 +2087,7 @@ impl Editor {
             load_diff_task: load_uncommitted_diff,
             temporary_diff_override: false,
             mouse_cursor_hidden: false,
+            smooth_cursor_state: SmoothCursorState::new(),
             minimap: None,
             hide_mouse_mode: EditorSettings::get_global(cx)
                 .hide_mouse
@@ -2000,6 +2104,16 @@ impl Editor {
         }
         editor.tasks_update_task = Some(editor.refresh_runnables(window, cx));
         editor._subscriptions.extend(project_subscriptions);
+
+        if EditorSettings::get_global(cx).cursor_smooth_animation {
+            let _snapshot = editor.snapshot(window, cx);
+            let selection = editor.selections.newest_display(cx);
+            let cursor_position = selection.head();
+            let initial_row = cursor_position.row().0 as f32;
+            let initial_col = cursor_position.column() as f32;
+            editor.smooth_cursor_state =
+                SmoothCursorState::new_with_position(initial_row, initial_col);
+        }
 
         editor._subscriptions.push(cx.subscribe_in(
             &cx.entity(),
@@ -2519,6 +2633,76 @@ impl Editor {
         // Disrupt blink for immediate user feedback that the cursor shape has changed
         self.blink_manager.update(cx, BlinkManager::show_cursor);
 
+        cx.notify();
+    }
+
+    pub fn update_smooth_cursor_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !EditorSettings::get_global(cx).cursor_smooth_animation {
+            return;
+        }
+
+        self.snapshot(window, cx);
+        let selection = self.selections.newest_display(cx);
+        let cursor_position = selection.head();
+        let new_row = cursor_position.row().0 as f32;
+        let new_col = cursor_position.column() as f32;
+
+        self.smooth_cursor_state.set_target(new_row, new_col);
+
+        // The animation will be driven by request_animation_frame()
+        if self.smooth_cursor_state.is_animating.get() {
+            cx.notify();
+        }
+    }
+
+    /// This ensures frame-rate independent animation
+    pub fn update_smooth_cursor_animation(&self) {
+        self.smooth_cursor_state.update_animation();
+    }
+
+    pub fn get_smooth_cursor_position(
+        &self,
+        cursor_position: DisplayPoint,
+        cx: &App,
+    ) -> (f32, f32) {
+        if !EditorSettings::get_global(cx).cursor_smooth_animation {
+            return (
+                cursor_position.row().0 as f32,
+                cursor_position.column() as f32,
+            );
+        }
+
+        if self.smooth_cursor_state.is_animating.get() {
+            self.smooth_cursor_state.get_displayed_position()
+        } else {
+            (
+                cursor_position.row().0 as f32,
+                cursor_position.column() as f32,
+            )
+        }
+    }
+
+    pub fn is_smooth_cursor_animating(&self, cx: &App) -> bool {
+        EditorSettings::get_global(cx).cursor_smooth_animation
+            && self.smooth_cursor_state.is_animating.get()
+    }
+
+    pub fn handle_smooth_cursor_setting_change(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if EditorSettings::get_global(cx).cursor_smooth_animation {
+            self.snapshot(window, cx);
+            let selection = self.selections.newest_display(cx);
+            let cursor_position = selection.head();
+            let current_row = cursor_position.row().0 as f32;
+            let current_col = cursor_position.column() as f32;
+            self.smooth_cursor_state =
+                SmoothCursorState::new_with_position(current_row, current_col);
+        } else {
+            self.smooth_cursor_state = SmoothCursorState::new();
+        }
         cx.notify();
     }
 
@@ -3076,6 +3260,8 @@ impl Editor {
                 window,
                 cx,
             );
+
+            self.update_smooth_cursor_target(window, cx);
 
             if self.should_open_signature_help_automatically(&old_cursor_position, cx) {
                 self.show_signature_help(&ShowSignatureHelp, window, cx);
@@ -18941,6 +19127,8 @@ impl Editor {
             )),
             cx,
         );
+
+        self.handle_smooth_cursor_setting_change(window, cx);
 
         let old_cursor_shape = self.cursor_shape;
 

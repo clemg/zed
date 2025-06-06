@@ -1393,10 +1393,33 @@ impl EditorElement {
                         None
                     };
 
-                    let x = cursor_character_x - scroll_pixel_position.x;
-                    let y = (cursor_position.row().as_f32()
-                        - scroll_pixel_position.y / line_height)
-                        * line_height;
+                    let (animated_row, animated_col) =
+                        editor.get_smooth_cursor_position(cursor_position, cx);
+
+                    if editor.is_smooth_cursor_animating(cx) {
+                        editor.update_smooth_cursor_animation();
+                        window.request_animation_frame();
+                    }
+
+                    let x = if editor.is_smooth_cursor_animating(cx) {
+                        // For animated cursor, calculate x position based on animated column
+                        let col_index = (animated_col as usize).min(cursor_row_layout.len);
+                        let col_fraction = animated_col - animated_col.floor();
+
+                        if col_fraction > 0.0 && col_index < cursor_row_layout.len {
+                            // Interpolate between character positions for smooth sub-character movement
+                            let start_x = cursor_row_layout.x_for_index(col_index);
+                            let end_x = cursor_row_layout
+                                .x_for_index((col_index + 1).min(cursor_row_layout.len));
+                            (start_x + (end_x - start_x) * col_fraction) - scroll_pixel_position.x
+                        } else {
+                            cursor_row_layout.x_for_index(col_index) - scroll_pixel_position.x
+                        }
+                    } else {
+                        cursor_character_x - scroll_pixel_position.x
+                    };
+
+                    let y = (animated_row - scroll_pixel_position.y / line_height) * line_height;
                     if selection.is_newest {
                         editor.pixel_position_of_newest_cursor = Some(point(
                             text_hitbox.origin.x + x + block_width / 2.,
@@ -1405,19 +1428,14 @@ impl EditorElement {
 
                         if autoscroll_containing_element {
                             let top = text_hitbox.origin.y
-                                + (cursor_position.row().as_f32() - scroll_position.y - 3.).max(0.)
-                                    * line_height;
+                                + (animated_row - scroll_position.y - 3.).max(0.) * line_height;
                             let left = text_hitbox.origin.x
-                                + (cursor_position.column() as f32 - scroll_position.x - 3.)
-                                    .max(0.)
-                                    * em_width;
+                                + (animated_col - scroll_position.x - 3.).max(0.) * em_width;
 
                             let bottom = text_hitbox.origin.y
-                                + (cursor_position.row().as_f32() - scroll_position.y + 4.)
-                                    * line_height;
+                                + (animated_row - scroll_position.y + 4.) * line_height;
                             let right = text_hitbox.origin.x
-                                + (cursor_position.column() as f32 - scroll_position.x + 4.)
-                                    * em_width;
+                                + (animated_col - scroll_position.x + 4.) * em_width;
 
                             autoscroll_bounds =
                                 Some(Bounds::from_corners(point(left, top), point(right, bottom)))

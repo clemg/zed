@@ -11,6 +11,7 @@ use util::serde::default_true;
 #[derive(Deserialize, Clone)]
 pub struct EditorSettings {
     pub cursor_blink: bool,
+    pub cursor_smooth_animation: bool,
     pub cursor_shape: Option<CursorShape>,
     pub current_line_highlight: CurrentLineHighlight,
     pub selection_highlight: bool,
@@ -343,6 +344,10 @@ pub struct EditorSettingsContent {
     ///
     /// Default: true
     pub cursor_blink: Option<bool>,
+    /// Whether the cursor movement should be animated smoothly.
+    ///
+    /// Default: false
+    pub cursor_smooth_animation: Option<bool>,
     /// Cursor shape for the default editor.
     /// Can be "bar", "block", "underline", or "hollow".
     ///
