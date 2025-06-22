@@ -155,6 +155,10 @@
   "use_system_prompts": true,
   // Whether the cursor blinks in the editor.
   "cursor_blink": true,
+  // Whether cursor movement should be animated smoothly.
+  // When enabled, the cursor will smoothly animate to new positions over 80ms
+  // instead of teleporting instantly.
+  "cursor_smooth_animation": false,
   // Cursor shape for the default editor.
   //  1. A vertical bar
   //     "bar"
