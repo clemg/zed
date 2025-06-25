@@ -396,6 +396,14 @@ impl SmoothCursorState {
         self.target_col.set(col);
         self.is_animating.set(false);
     }
+
+    fn set_starting_position(&self, row: f32, col: f32) {
+        // Only set starting position if we're not currently animating
+        if !self.is_animating.get() {
+            self.displayed_row.set(row);
+            self.displayed_col.set(col);
+        }
+    }
 }
 
 pub enum ActiveDebugLine {}
@@ -3000,6 +3008,39 @@ impl Editor {
             return;
         }
         
+        self.snapshot(window, cx);
+        let selection = self.selections.newest_display(cx);
+        let cursor_position = selection.head();
+        let new_row = cursor_position.row().0 as f32;
+        let new_col = cursor_position.column() as f32;
+        
+        self.smooth_cursor_state.set_target(new_row, new_col);
+        
+        // The animation will be driven by request_animation_frame()
+        if self.smooth_cursor_state.is_animating.get() {
+            cx.notify();
+        }
+    }
+
+    pub fn update_smooth_cursor_target_with_old_position(
+        &mut self, 
+        old_cursor_position: &Anchor, 
+        window: &mut Window, 
+        cx: &mut Context<Self>
+    ) {
+        if !EditorSettings::get_global(cx).cursor_smooth_animation {
+            return;
+        }
+        
+        let display_snapshot = self.display_map.update(cx, |map, cx| map.snapshot(cx));
+        
+        // Set starting position from old cursor position (before any adjustment)
+        let old_display_point = old_cursor_position.to_display_point(&display_snapshot);
+        let old_row = old_display_point.row().0 as f32;
+        let old_col = old_display_point.column() as f32;
+        self.smooth_cursor_state.set_starting_position(old_row, old_col);
+        
+        // Now set target to new position (after any adjustment)
         self.snapshot(window, cx);
         let selection = self.selections.newest_display(cx);
         let cursor_position = selection.head();
